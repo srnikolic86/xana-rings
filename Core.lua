@@ -1,4 +1,4 @@
--- XanaRings 0.3.3  (snippet-free build for the WoW Forever beta)
+-- XanaRings 0.4.0  (snippet-free build for the WoW Forever beta)
 --
 -- The Forever beta client cannot compile restricted-environment snippets
 -- (loadstring_untainted is missing), so this version uses none:
@@ -15,6 +15,9 @@
 --
 -- Flow: macro -> ring opens -> tilt stick to highlight -> A uses it, B cancels.
 --       D-pad up/right/down/left instantly uses the slot lying in that direction.
+--
+-- Auto rings store item TYPES instead of entries (ring.auto, a string of type letters)
+-- and fill ring.slots from the player's bags each time they are opened.
 
 local ADDON = ...
 
@@ -41,6 +44,89 @@ local function IndexForAngle(deg, n)
     if n < 1 then return 0 end
     local step = 360 / n
     return math.floor(((deg + step / 2) % 360) / step) + 1
+end
+
+-------------------------------------------------------------------------------
+-- Auto rings: item types and the bag scan
+-------------------------------------------------------------------------------
+local AUTO_MAX = 16                 -- more than this is too fiddly to aim at
+local CLASS_CONSUMABLE, CLASS_QUEST = 0, 12
+
+-- `key` is the letter saved in the macro, so never reuse or reorder letters.
+-- Display order is the order of this list.
+local AUTO_TYPES = {
+    { key = "p", label = "Potions",      words = { "potions" },  class = CLASS_CONSUMABLE, sub = 1 },
+    { key = "e", label = "Elixirs",      words = { "elixirs" },  class = CLASS_CONSUMABLE, sub = 2 },
+    { key = "f", label = "Flasks",       words = { "flasks" },   class = CLASS_CONSUMABLE, sub = 3 },
+    { key = "d", label = "Food & Drink", words = { "food", "drinks" }, class = CLASS_CONSUMABLE, sub = 5 },
+    { key = "b", label = "Bandages",     words = { "bandages" }, class = CLASS_CONSUMABLE, sub = 7 },
+    { key = "s", label = "Scrolls",      words = { "scrolls" },  class = CLASS_CONSUMABLE, sub = 4 },
+    { key = "q", label = "Quest items",  words = { "quest" },    class = CLASS_QUEST },
+    { key = "o", label = "Other usable", words = { "other" },    class = CLASS_CONSUMABLE },   -- any other subclass
+}
+for i, t in ipairs(AUTO_TYPES) do t.order = i end
+
+local function AutoTypeOf(classID, subclassID)
+    local other
+    for _, t in ipairs(AUTO_TYPES) do
+        if t.class == classID then
+            if t.sub == nil then
+                other = other or t
+            elseif t.sub == subclassID then
+                return t
+            end
+        end
+    end
+    return other
+end
+
+local function AutoLabels(auto)
+    local labels = {}
+    for _, t in ipairs(AUTO_TYPES) do
+        if auto:find(t.key, 1, true) then labels[#labels + 1] = t.label end
+    end
+    return #labels > 0 and table.concat(labels, ", ") or "nothing yet"
+end
+
+local BagSlotCount    =(C_Container and C_Container.GetContainerNumSlots) or GetContainerNumSlots
+local GetBagItemID    = (C_Container and C_Container.GetContainerItemID) or GetContainerItemID
+local ItemInfoInstant = (C_Item and C_Item.GetItemInfoInstant) or GetItemInfoInstant
+local ItemSpell       = (C_Item and C_Item.GetItemSpell) or GetItemSpell
+local ItemCount       = (C_Item and C_Item.GetItemCount) or GetItemCount
+
+local function ItemName(id)
+    return (C_Item and C_Item.GetItemNameByID and C_Item.GetItemNameByID(id))
+        or (GetItemInfo and GetItemInfo(id)) or ""
+end
+
+-- Every usable item in the bags whose type is in `auto`, one entry per item ID.
+local function ScanBags(auto)
+    local seen, list = {}, {}
+    for bag = 0, NUM_BAG_SLOTS or 4 do
+        for bagSlot = 1, BagSlotCount(bag) or 0 do
+            local id = GetBagItemID(bag, bagSlot)
+            if id and not seen[id] then
+                seen[id] = true
+                local classID, subclassID = select(6, ItemInfoInstant(id))
+                local t = AutoTypeOf(classID, subclassID)
+                if t and auto:find(t.key, 1, true) and ItemSpell(id) then
+                    list[#list + 1] = { kind = "item", id = id, order = t.order,
+                                        name = ItemName(id), count = ItemCount(id) }
+                end
+            end
+        end
+    end
+    table.sort(list, function(a, b)
+        if a.order ~= b.order then return a.order < b.order end
+        if a.name ~= b.name then return a.name < b.name end
+        return a.id < b.id
+    end)
+    for i = #list, AUTO_MAX + 1, -1 do list[i] = nil end
+    return list
+end
+
+local function Rescan(ring)
+    if ring.auto then ring.slots = ScanBags(ring.auto) end
 end
 
 -------------------------------------------------------------------------------
@@ -98,6 +184,8 @@ local function GetSlotButton(i)
     btn.plus = btn:CreateFontString(nil, "OVERLAY", "GameFontNormalHuge")
     btn.plus:SetPoint("CENTER")
     btn.plus:SetText("+")
+    btn.count = btn:CreateFontString(nil, "OVERLAY", "NumberFontNormal")
+    btn.count:SetPoint("BOTTOMRIGHT", -3, 3)
     btn.glow = btn:CreateTexture(nil, "OVERLAY")
     btn.glow:SetTexture("Interface\\Buttons\\UI-ActionButton-Border")
     btn.glow:SetBlendMode("ADD")
@@ -130,11 +218,13 @@ local function Refresh()
     if not ring then return end
     ui.title:SetText(ring.name)
     local n = #ring.slots
-    local count = ui.editing and n + 1 or n               -- the editor shows one extra "+" slot
+    local adding = ui.editing and not ring.auto            -- auto rings are filled from the bags
+    local count = adding and n + 1 or n                   -- the editor shows one extra "+" slot
     Layout(count)
     for i = 1, count do
         local btn, slot = ui.slots[i], ring.slots[i]
-        btn:EnableMouse(ui.editing and true or false)
+        btn:EnableMouse(adding)
+        btn.count:SetText((slot and slot.count and slot.count > 1) and slot.count or "")
         if slot then
             btn.icon:SetTexture(GetIcon(slot) or 134400)
         else
@@ -148,9 +238,16 @@ end
 local function ShowRing(ring, editing)
     ui.ring, ui.editing, ui.selected = ring, editing, 0
     ui.done:SetShown(editing)
+    ui.autoPanel:SetShown(editing and ring.auto ~= nil)
     if ui.EnableGamePadStick then ui:EnableGamePadStick(not editing) end
-    if editing then
+    if editing and ring.auto then
+        Rescan(ring)
+        ui.autoPanel:Sync()
+        ui.hint:SetText("Tick the item types to include. The ring shows what is in your bags right now.")
+    elseif editing then
         ui.hint:SetText("Drop a spell or item on + to add it, or on an icon to replace it. Right-click removes.")
+    elseif #ring.slots == 0 and ring.auto then
+        ui.hint:SetText(("Nothing in your bags matches this ring. Press B, or /xrings edit %s"):format(ring.name))
     elseif #ring.slots == 0 then
         ui.hint:SetText(("This ring is empty. Press B, then type /xrings edit %s"):format(ring.name))
     else
@@ -180,6 +277,7 @@ local function OpenRing(ring)
         return
     end
     if ui.editing and ui:IsShown() then ui:Hide() end
+    Rescan(ring)
     openRing = ring
     commit.armed, cancel.armed = nil, nil
     SetCommitSlot("", nil)
@@ -232,12 +330,14 @@ local function Compact(ring)
     ring.slots = list
 end
 
+-- Entries: "s<spellID>,i<itemID>,...".  Auto rings: "@" followed by their type letters.
 local function Serialize(ring)
+    local name = ring.name:gsub("[|,\n]", "")
+    if ring.auto then return ("%d|%s|@%s"):format(ring.id, name, ring.auto) end
     local parts = {}
     for i, s in ipairs(ring.slots) do
         parts[i] = (s.kind == "spell" and "s" or "i") .. s.id
     end
-    local name = ring.name:gsub("[|,\n]", "")
     return ("%d|%s|%s"):format(ring.id, name, table.concat(parts, ","))
 end
 
@@ -287,8 +387,9 @@ local function ImportFromMacros()
         local id, name, data = (body or ""):match("/[xr]rdata (%d+)|([^|]*)|([^\n]*)")
         id = tonumber(id)
         if id and not FindRingById(id) then
-            local ring = { id = id, name = name ~= "" and name or ("Ring " .. id), slots = {} }
-            for _, field in ipairs({ strsplit(",", data) }) do
+            local ring = { id = id, name = name ~= "" and name or ("Ring " .. id), slots = {},
+                           auto = data:match("^@(%a*)$") }
+            for _, field in ipairs(ring.auto and {} or { strsplit(",", data) }) do
                 local kind, num = field:match("^([si])(%d+)$")
                 if kind then
                     ring.slots[#ring.slots + 1] =
@@ -370,8 +471,50 @@ local function RenameRing(ring, newName)
     if ui.ring == ring then Refresh() end
 end
 
+local function SetAutoType(ring, key, on)
+    if InCombatLockdown() then Print("Can't edit rings in combat.") ui.autoPanel:Sync() return end
+    local keys = {}
+    for _, t in ipairs(AUTO_TYPES) do
+        local has
+        if t.key == key then has = on else has = ring.auto:find(t.key, 1, true) end
+        if has then keys[#keys + 1] = t.key end
+    end
+    ring.auto = table.concat(keys)
+    UpdateMacro(ring)
+    if ui.ring == ring and ui:IsShown() then
+        Rescan(ring)
+        Refresh()
+    end
+end
+
+-- "potion, food & drink, quest" -> "pdq".  Returns nil plus the word it didn't know.
+local function ParseAutoTypes(text)
+    local keys = ""
+    for token in (text or ""):gmatch("[^,]+") do
+        token = strlower(strtrim(token))
+        if token == "all" then
+            for _, t in ipairs(AUTO_TYPES) do keys = keys .. t.key end
+        elseif token ~= "none" and token ~= "" then
+            local found
+            for _, t in ipairs(AUTO_TYPES) do
+                if token == strlower(t.label) then found = t end
+                for _, word in ipairs(t.words) do
+                    if #token >= 3 and word:sub(1, #token) == token then found = t end
+                end
+            end
+            if not found then return nil, token end
+            keys = keys .. found.key
+        end
+    end
+    local ordered = {}
+    for _, t in ipairs(AUTO_TYPES) do
+        if keys:find(t.key, 1, true) then ordered[#ordered + 1] = t.key end
+    end
+    return table.concat(ordered)
+end
+
 function SlotDrop(btn, mouseButton)
-    if not ui.editing then return end
+    if not ui.editing or ui.ring.auto then return end
     if mouseButton == "RightButton" then RemoveSlot(ui.ring, btn.index) return end
     local kind, a, _, c = GetCursorInfo()
     if kind == "spell" then
@@ -389,13 +532,43 @@ ui.done:SetPoint("CENTER", 0, -18)
 ui.done:SetText(DONE or "Done")
 ui.done:SetScript("OnClick", function() ui:Hide() end)
 
+-- Type checkboxes shown beside the ring while editing an auto ring.
+local panel = CreateFrame("Frame", nil, ui)
+panel:SetPoint("LEFT", ui, "RIGHT", 8, 0)
+panel:SetSize(190, 44 + #AUTO_TYPES * 26)
+panel:Hide()
+panel.bg = panel:CreateTexture(nil, "BACKGROUND")
+panel.bg:SetAllPoints()
+panel.bg:SetColorTexture(0, 0, 0, 0.6)
+panel.header = panel:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+panel.header:SetPoint("TOPLEFT", 12, -12)
+panel.header:SetText("Include from your bags:")
+panel.checks = {}
+for i, t in ipairs(AUTO_TYPES) do
+    local cb = CreateFrame("CheckButton", nil, panel, "UICheckButtonTemplate")
+    cb:SetSize(24, 24)
+    cb:SetPoint("TOPLEFT", 10, -32 - (i - 1) * 26)
+    cb.label = cb:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+    cb.label:SetPoint("LEFT", cb, "RIGHT", 4, 0)
+    cb.label:SetText(t.label)
+    cb.autoType = t
+    cb:SetScript("OnClick", function(self) SetAutoType(ui.ring, self.autoType.key, self:GetChecked()) end)
+    panel.checks[i] = cb
+end
+function panel:Sync()
+    local auto = ui.ring and ui.ring.auto or ""
+    for _, cb in ipairs(self.checks) do cb:SetChecked(auto:find(cb.autoType.key, 1, true) ~= nil) end
+end
+ui.autoPanel = panel
+
 
 -------------------------------------------------------------------------------
 -- Macros
 -------------------------------------------------------------------------------
 local function MakeMacro(ring)
     if InCombatLockdown() then Print("Can't create macros in combat.") return end
-    local icon = ring.slots[1] and GetIcon(ring.slots[1]) or 134400
+    Rescan(ring)
+    local icon =ring.slots[1] and GetIcon(ring.slots[1]) or 134400
     local index = FindRingMacro(ring.id)
     if index then
         EditMacro(index, nil, icon, MacroBody(ring))
@@ -417,18 +590,55 @@ local FindRing = FindRingByName
 
 local commands = {}
 
-function commands.new(name)
-    name = strtrim(name or "")
-    if name == "" then Print("Usage: /xrings new <name>") return end
+-- auto: nil for a normal ring, a string of type letters for an auto ring.
+local function CreateRing(name, auto, usage)
+    name = strtrim(((name or ""):gsub("[|,\n]", "")))      -- extra parens drop gsub's count
+    if name == "" then Print(usage) return end
     if FindRing(name) then Print("A ring with that name already exists.") return end
     if InCombatLockdown() then Print("Can't create rings in combat.") return end
-    local ring = { id = db.nextId, name = name, slots = {} }
+    local ring = { id = db.nextId, name = name, slots = {}, auto = auto }
     db.nextId = db.nextId + 1
     db.rings[#db.rings + 1] = ring
     CreateOpener(ring)
-    Print(("Created '%s'. Fill it, then run /xrings macro %s"):format(name, name))
+    if auto then
+        Print(("Created auto ring '%s'. Tick the item types it should offer, then run /xrings macro %s"):format(name, name))
+    else
+        Print(("Created '%s'. Fill it, then run /xrings macro %s"):format(name, name))
+    end
     CloseRing()
     ShowRing(ring, true)
+end
+
+function commands.new(name) CreateRing(name, nil, "Usage: /xrings new <name>") end
+function commands.auto(name) CreateRing(name, "", "Usage: /xrings auto <name>") end
+
+function commands.types(args)
+    local name, list = (args or ""):match("^(.-)%s*>%s*(.*)$")
+    if list == "" then list = nil end                     -- "types Pots >" just shows the types
+    local ring = FindRing(name or args)
+    if not ring then Print("Usage: /xrings types <name> > potions, food, quest ...") return end
+    if not ring.auto then
+        Print(("'%s' is a normal ring. Types only apply to auto rings (/xrings auto <name>)."):format(ring.name))
+        return
+    end
+    if list then
+        if InCombatLockdown() then Print("Can't edit rings in combat.") return end
+        local keys, bad = ParseAutoTypes(list)
+        if not keys then
+            local words = {}
+            for _, t in ipairs(AUTO_TYPES) do words[#words + 1] = t.words[1] end
+            Print(("Unknown type '%s'. Types: %s, all, none"):format(bad, table.concat(words, ", ")))
+            return
+        end
+        ring.auto = keys
+        UpdateMacro(ring)
+        if ui.ring == ring and ui:IsShown() then
+            Rescan(ring)
+            if ui.editing then ui.autoPanel:Sync() end
+            Refresh()
+        end
+    end
+    Print(("'%s' offers: %s"):format(ring.name, AutoLabels(ring.auto)))
 end
 
 function commands.edit(name)
@@ -469,7 +679,8 @@ end
 function commands.list()
     if #db.rings == 0 then Print("No rings yet. Create one with /xrings new <name>") return end
     for _, ring in ipairs(db.rings) do
-        Print(("%s  (%d entries%s)"):format(ring.name, #ring.slots,
+        local contents = ring.auto and ("auto: " .. AutoLabels(ring.auto)) or (#ring.slots .. " entries")
+        Print(("%s  (%s%s)"):format(ring.name, contents,
             FindRingMacro(ring.id) and "" or ", |cffff6666no macro yet - won't survive a relog|r"))
     end
 end
@@ -482,7 +693,8 @@ SlashCmdList.XANARINGS = function(msg)
     if fn then
         fn(rest)
     else
-        Print("Commands: new <name>, edit <name>, rename <old> > <new>, macro <name>, delete <name>, list")
+        Print("Commands: new <name>, auto <name>, edit <name>, types <name> > <types>, "
+            .. "rename <old> > <new>, macro <name>, delete <name>, list")
     end
 end
 
@@ -499,6 +711,7 @@ loader:RegisterEvent("ADDON_LOADED")
 loader:RegisterEvent("PLAYER_LOGIN")
 loader:RegisterEvent("UPDATE_MACROS")
 loader:RegisterEvent("PLAYER_REGEN_DISABLED")
+loader:RegisterEvent("BAG_UPDATE_DELAYED")
 loader:SetScript("OnEvent", function(self, event, name)
     if event == "ADDON_LOADED" then
         if name ~= ADDON then return end
@@ -513,6 +726,12 @@ loader:SetScript("OnEvent", function(self, event, name)
     elseif event == "PLAYER_REGEN_DISABLED" then
         -- Fires just before combat lockdown: last chance to release our bindings.
         CloseRing()
+    elseif event == "BAG_UPDATE_DELAYED" then
+        -- Keep an open auto ring editor's preview in step with the bags.
+        if ui:IsShown() and ui.editing and ui.ring and ui.ring.auto then
+            Rescan(ui.ring)
+            Refresh()
+        end
     else
         ImportFromMacros()
     end
