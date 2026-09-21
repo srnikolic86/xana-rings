@@ -1,4 +1,4 @@
-# XanaRings 0.3.3
+# XanaRings
 
 Custom gamepad radial menus for World of Warcraft: Forever.
 
@@ -124,8 +124,3 @@ Your macro slots are full. Delete a macro you do not need and try again.
 
 Type `/console scriptErrors 1` so errors show on screen, reproduce the
 problem, and copy the full error text when reporting it.
-
-**Upgrading from the old name (RadialRings)**
-
-Delete the old `RadialRings` folder. Your old macros are detected and
-rewritten automatically the first time you log in with XanaRings.
