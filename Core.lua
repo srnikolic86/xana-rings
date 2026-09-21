@@ -1,0 +1,519 @@
+-- XanaRings 0.3.3  (snippet-free build for the WoW Forever beta)
+--
+-- The Forever beta client cannot compile restricted-environment snippets
+-- (loadstring_untainted is missing), so this version uses none:
+--   * the macro /clicks a plain button that opens the ring
+--   * one SecureActionButton ("commit") does the casting; its attributes and the
+--     temporary override bindings are set by ordinary code, which is only legal
+--     OUT OF COMBAT. Rings therefore refuse to open in combat on this build.
+--
+-- The beta also fails to load SavedVariables, so each ring's definition is mirrored
+-- into its macro body (a no-op "/xrdata ..." line) and re-imported at login.
+--
+-- Rings have no fixed size: ring.slots is a plain list, the circle grows with it.
+-- The only ceiling is the 255-character macro body the ring has to fit into.
+--
+-- Flow: macro -> ring opens -> tilt stick to highlight -> A uses it, B cancels.
+--       D-pad up/right/down/left instantly uses the slot lying in that direction.
+
+local ADDON = ...
+
+local MIN_RADIUS  = 110
+local SLOT_SIZE   = 52
+local SLOT_GAP    = 12
+local DEADZONE    = 0.5
+local MACRO_LIMIT = 255
+local DPAD = {
+    PADDUP    = { name = "up",    angle = 0   },
+    PADDRIGHT = { name = "right", angle = 90  },
+    PADDDOWN  = { name = "down",  angle = 180 },
+    PADDLEFT  = { name = "left",  angle = 270 },
+}
+
+local db
+local openers = {}
+local openRing            -- ring currently open for use (not editing)
+local warnedCombat
+local function Print(msg) print("|cff66ccffXanaRings:|r " .. msg) end
+
+-- Which of n slots lies at this angle (0 = up, clockwise). Slot 1 is always on top.
+local function IndexForAngle(deg, n)
+    if n < 1 then return 0 end
+    local step = 360 / n
+    return math.floor(((deg + step / 2) % 360) / step) + 1
+end
+
+-------------------------------------------------------------------------------
+-- The one secure button
+-------------------------------------------------------------------------------
+local commit = CreateFrame("Button", "XanaRingsCommit", UIParent, "SecureActionButtonTemplate")
+commit:RegisterForClicks("AnyDown", "AnyUp")
+
+local cancel = CreateFrame("Button", "XanaRingsCancel", UIParent)
+cancel:RegisterForClicks("AnyDown", "AnyUp")
+
+-- suffix ""                 -> what A uses (the stick-highlighted slot)
+-- suffix "-up" / "-right".. -> what that D-pad direction uses
+local function SetCommitSlot(suffix, slot)
+    local kind = slot and slot.kind or (suffix ~= "" and "none" or nil)
+    commit:SetAttribute("type" .. suffix, kind)
+    commit:SetAttribute("spell" .. suffix, (slot and slot.kind == "spell") and slot.id or nil)
+    commit:SetAttribute("item" .. suffix, (slot and slot.kind == "item") and ("item:" .. slot.id) or nil)
+end
+
+-------------------------------------------------------------------------------
+-- Visible ring
+-------------------------------------------------------------------------------
+local ui = CreateFrame("Frame", "XanaRingsFrame", UIParent)
+ui:SetPoint("CENTER")
+ui:SetFrameStrata("DIALOG")
+ui:Hide()
+ui.slots = {}
+
+ui.title = ui:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+ui.title:SetPoint("CENTER", 0, 8)
+ui.hint = ui:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+ui.hint:SetPoint("TOP", ui, "BOTTOM", 0, -4)
+
+local function GetIcon(slot)
+    if slot.kind == "spell" then
+        return (C_Spell and C_Spell.GetSpellTexture and C_Spell.GetSpellTexture(slot.id))
+            or (GetSpellTexture and GetSpellTexture(slot.id))
+    elseif slot.kind == "item" then
+        return (C_Item and C_Item.GetItemIconByID and C_Item.GetItemIconByID(slot.id))
+            or (GetItemIcon and GetItemIcon(slot.id))
+    end
+end
+
+local SlotDrop            -- defined in the editing section
+
+local function GetSlotButton(i)
+    local btn = ui.slots[i]
+    if btn then return btn end
+    btn = CreateFrame("Button", nil, ui)
+    btn.index = i
+    btn:SetSize(SLOT_SIZE, SLOT_SIZE)
+    btn.icon = btn:CreateTexture(nil, "ARTWORK")
+    btn.icon:SetAllPoints()
+    btn.plus = btn:CreateFontString(nil, "OVERLAY", "GameFontNormalHuge")
+    btn.plus:SetPoint("CENTER")
+    btn.plus:SetText("+")
+    btn.glow = btn:CreateTexture(nil, "OVERLAY")
+    btn.glow:SetTexture("Interface\\Buttons\\UI-ActionButton-Border")
+    btn.glow:SetBlendMode("ADD")
+    btn.glow:SetPoint("CENTER")
+    btn.glow:SetSize(SLOT_SIZE * 1.75, SLOT_SIZE * 1.75)
+    btn:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+    btn:SetScript("OnClick", function(self, mouseButton) SlotDrop(self, mouseButton) end)
+    btn:SetScript("OnReceiveDrag", function(self) SlotDrop(self) end)
+    ui.slots[i] = btn
+    return btn
+end
+
+-- Place `count` buttons evenly on a circle that grows so icons never overlap.
+local function Layout(count)
+    local radius = math.max(MIN_RADIUS, count * (SLOT_SIZE + SLOT_GAP) / (2 * math.pi))
+    local size = radius * 2 + SLOT_SIZE + 40
+    ui:SetSize(size, size)
+    for i = 1, count do
+        local btn = GetSlotButton(i)
+        local a = math.rad((i - 1) * 360 / count)          -- slot 1 on top, clockwise
+        btn:ClearAllPoints()
+        btn:SetPoint("CENTER", ui, "CENTER", math.sin(a) * radius, math.cos(a) * radius)
+        btn:Show()
+    end
+    for i = count + 1, #ui.slots do ui.slots[i]:Hide() end
+end
+
+local function Refresh()
+    local ring = ui.ring
+    if not ring then return end
+    ui.title:SetText(ring.name)
+    local n = #ring.slots
+    local count = ui.editing and n + 1 or n               -- the editor shows one extra "+" slot
+    Layout(count)
+    for i = 1, count do
+        local btn, slot = ui.slots[i], ring.slots[i]
+        btn:EnableMouse(ui.editing and true or false)
+        if slot then
+            btn.icon:SetTexture(GetIcon(slot) or 134400)
+        else
+            btn.icon:SetColorTexture(0, 0, 0, 0.45)
+        end
+        btn.plus:SetShown(not slot)
+        btn.glow:SetShown(not ui.editing and i == ui.selected)
+    end
+end
+
+local function ShowRing(ring, editing)
+    ui.ring, ui.editing, ui.selected = ring, editing, 0
+    ui.done:SetShown(editing)
+    if ui.EnableGamePadStick then ui:EnableGamePadStick(not editing) end
+    if editing then
+        ui.hint:SetText("Drop a spell or item on + to add it, or on an icon to replace it. Right-click removes.")
+    elseif #ring.slots == 0 then
+        ui.hint:SetText(("This ring is empty. Press B, then type /xrings edit %s"):format(ring.name))
+    else
+        ui.hint:SetText("Stick + A to use.  D-pad = quick pick.  B cancels.")
+    end
+    Refresh()
+    ui:Show()
+end
+
+-------------------------------------------------------------------------------
+-- Open / close (out of combat only)
+-------------------------------------------------------------------------------
+local function CloseRing()
+    if not openRing then return end
+    openRing = nil
+    commit.armed, cancel.armed = nil, nil
+    if not InCombatLockdown() then ClearOverrideBindings(ui) end
+    ui:Hide()
+end
+
+local function OpenRing(ring)
+    if InCombatLockdown() then
+        if not warnedCombat then
+            warnedCombat = true
+            Print("Rings can't open in combat on this beta build (Blizzard's secure snippet compiler is missing).")
+        end
+        return
+    end
+    if ui.editing and ui:IsShown() then ui:Hide() end
+    openRing = ring
+    commit.armed, cancel.armed = nil, nil
+    SetCommitSlot("", nil)
+    SetOverrideBindingClick(ui, true, "PAD1", "XanaRingsCommit", "LeftButton")
+    SetOverrideBindingClick(ui, true, "PAD2", "XanaRingsCancel", "LeftButton")
+    SetOverrideBindingClick(ui, true, "ESCAPE", "XanaRingsCancel", "LeftButton")
+    local n = #ring.slots
+    for key, dir in pairs(DPAD) do
+        SetCommitSlot("-" .. dir.name, ring.slots[IndexForAngle(dir.angle, n)])
+        SetOverrideBindingClick(ui, true, key, "XanaRingsCommit", dir.name)
+    end
+    ShowRing(ring, false)
+end
+
+local function ToggleRing(ring)
+    if openRing == ring then CloseRing() else CloseRing() OpenRing(ring) end
+end
+
+-- "armed" = we saw the key go down while the ring was open. It ignores the stray key-UP
+-- that arrives if the macro itself is bound to A / B / the D-pad.
+commit:SetScript("PreClick", function(self, _, down) if down then self.armed = true end end)
+commit:SetScript("PostClick", function(self, _, down)
+    if not down and self.armed then CloseRing() end
+end)
+cancel:SetScript("OnClick", function(self, _, down)
+    if down then self.armed = true elseif self.armed then CloseRing() end
+end)
+
+ui:SetScript("OnGamePadStick", function(self, stick, x, y, len)
+    if self.editing or not openRing or len < DEADZONE or InCombatLockdown() then return end
+    local index = IndexForAngle(math.deg(math.atan2(x, y)), #openRing.slots)
+    if index > 0 and index ~= self.selected then
+        self.selected = index
+        SetCommitSlot("", openRing.slots[index])
+        Refresh()
+    end
+end)
+
+-------------------------------------------------------------------------------
+-- Ring storage: SavedVariables + a copy inside each ring's macro
+-------------------------------------------------------------------------------
+-- Older versions stored 8 fixed slots with gaps; squeeze those into a plain list.
+local function Compact(ring)
+    local keys, list = {}, {}
+    for k in pairs(ring.slots or {}) do
+        if type(k) == "number" then keys[#keys + 1] = k end
+    end
+    table.sort(keys)
+    for _, k in ipairs(keys) do list[#list + 1] = ring.slots[k] end
+    ring.slots = list
+end
+
+local function Serialize(ring)
+    local parts = {}
+    for i, s in ipairs(ring.slots) do
+        parts[i] = (s.kind == "spell" and "s" or "i") .. s.id
+    end
+    local name = ring.name:gsub("[|,\n]", "")
+    return ("%d|%s|%s"):format(ring.id, name, table.concat(parts, ","))
+end
+
+local function MacroBody(ring)
+    return "/click XanaRingsOpen" .. ring.id .. "\n/xrdata " .. Serialize(ring)
+end
+
+local function MaxMacros()
+    return (MAX_ACCOUNT_MACROS or 120) + (MAX_CHARACTER_MACROS or 30)
+end
+
+local function FindRingMacro(id)
+    local needle, legacy = "/xrdata " .. id .. "|", "/rrdata " .. id .. "|"
+    for i = 1, MaxMacros() do
+        local name, _, body = GetMacroInfo(i)
+        if name and body and (body:find(needle, 1, true) or body:find(legacy, 1, true)) then return i end
+    end
+end
+
+local function UpdateMacro(ring)
+    if InCombatLockdown() then return end
+    local index = FindRingMacro(ring.id)
+    if index then EditMacro(index, nil, nil, MacroBody(ring)) end
+end
+
+local function FindRingById(id)
+    for index, ring in ipairs(db.rings) do
+        if ring.id == id then return ring, index end
+    end
+end
+
+local function CreateOpener(ring)
+    if openers[ring.id] then openers[ring.id].ring = ring return end
+    local b = CreateFrame("Button", "XanaRingsOpen" .. ring.id, UIParent)
+    b:RegisterForClicks("AnyDown", "AnyUp")
+    b.ring = ring
+    b:SetScript("OnClick", function(self) if self.ring then ToggleRing(self.ring) end end)
+    openers[ring.id] = b
+end
+
+-- Rebuild any ring that exists as a macro but not in the DB.
+local function ImportFromMacros()
+    if not db then return end
+    for i = 1, MaxMacros() do
+        local _, _, body = GetMacroInfo(i)
+        -- "/rrdata" is the data line written by the addon's old name (RadialRings)
+        local id, name, data = (body or ""):match("/[xr]rdata (%d+)|([^|]*)|([^\n]*)")
+        id = tonumber(id)
+        if id and not FindRingById(id) then
+            local ring = { id = id, name = name ~= "" and name or ("Ring " .. id), slots = {} }
+            for _, field in ipairs({ strsplit(",", data) }) do
+                local kind, num = field:match("^([si])(%d+)$")
+                if kind then
+                    ring.slots[#ring.slots + 1] =
+                        { kind = kind == "s" and "spell" or "item", id = tonumber(num) }
+                end
+            end
+            db.rings[#db.rings + 1] = ring
+            if id >= db.nextId then db.nextId = id + 1 end
+            CreateOpener(ring)
+        end
+        -- Rewrite old-name macros so they /click the renamed opener button.
+        if id and body:find("/rrdata ", 1, true) and not InCombatLockdown() then
+            EditMacro(i, nil, nil, MacroBody(FindRingById(id)))
+        end
+    end
+end
+
+-------------------------------------------------------------------------------
+-- Editing
+-------------------------------------------------------------------------------
+local function PutSlot(ring, i, kind, id)
+    if InCombatLockdown() then Print("Can't edit rings in combat.") return end
+    local n = #ring.slots
+    if i > n then i = n + 1 end
+    local previous = ring.slots[i]
+    ring.slots[i] = { kind = kind, id = id }
+    if #MacroBody(ring) > MACRO_LIMIT then
+        ring.slots[i] = previous                            -- nil again if this was an append
+        Print(("'%s' is full: its %d entries are all that fit in a 255-character macro."):format(ring.name, n))
+        return
+    end
+    UpdateMacro(ring)
+    Refresh()
+end
+
+local function RemoveSlot(ring, i)
+    if InCombatLockdown() then Print("Can't edit rings in combat.") return end
+    if not ring.slots[i] then return end
+    table.remove(ring.slots, i)                             -- later entries shift down
+    UpdateMacro(ring)
+    Refresh()
+end
+
+local function FindRingByName(name)
+    name = strlower(strtrim(name or ""))
+    for index, ring in ipairs(db.rings) do
+        if strlower(ring.name) == name then return ring, index end
+    end
+end
+
+local function AutoMacroName(prefix, ringName) return (prefix .. ringName):sub(1, 16) end
+
+local function RenameRing(ring, newName)
+    if InCombatLockdown() then Print("Can't rename rings in combat.") return end
+    local cleaned = (newName or ""):gsub("[|,\n]", "")       -- characters the data line can't hold
+    newName = strtrim(cleaned)                                -- (gsub's 2nd return must not reach strtrim)
+    if newName == "" then Print("The new name can't be empty.") return end
+    if newName == ring.name then return end
+    local clash = FindRingByName(newName)
+    if clash and clash ~= ring then Print(("There is already a ring called '%s'."):format(clash.name)) return end
+
+    local oldName = ring.name
+    ring.name = newName
+    if #MacroBody(ring) > MACRO_LIMIT then
+        ring.name = oldName
+        Print("That name is too long for this ring: name and entries share one 255-character macro.")
+        return
+    end
+
+    -- Keep the macro in step. Only retitle it if it still has the name we gave it,
+    -- so a macro the player renamed by hand is left alone.
+    local index = FindRingMacro(ring.id)
+    if index then
+        local macroName = GetMacroInfo(index)
+        local retitle = (macroName == AutoMacroName("XR ", oldName) or macroName == AutoMacroName("RR ", oldName))
+        EditMacro(index, retitle and AutoMacroName("XR ", newName) or nil, nil, MacroBody(ring))
+    end
+    Print(("Renamed '%s' to '%s'."):format(oldName, newName))
+    if ui.ring == ring then Refresh() end
+end
+
+function SlotDrop(btn, mouseButton)
+    if not ui.editing then return end
+    if mouseButton == "RightButton" then RemoveSlot(ui.ring, btn.index) return end
+    local kind, a, _, c = GetCursorInfo()
+    if kind == "spell" then
+        PutSlot(ui.ring, btn.index, "spell", c or a)
+        ClearCursor()
+    elseif kind == "item" then
+        PutSlot(ui.ring, btn.index, "item", a)
+        ClearCursor()
+    end
+end
+
+ui.done = CreateFrame("Button", nil, ui, "UIPanelButtonTemplate")
+ui.done:SetSize(80, 22)
+ui.done:SetPoint("CENTER", 0, -18)
+ui.done:SetText(DONE or "Done")
+ui.done:SetScript("OnClick", function() ui:Hide() end)
+
+
+-------------------------------------------------------------------------------
+-- Macros
+-------------------------------------------------------------------------------
+local function MakeMacro(ring)
+    if InCombatLockdown() then Print("Can't create macros in combat.") return end
+    local icon = ring.slots[1] and GetIcon(ring.slots[1]) or 134400
+    local index = FindRingMacro(ring.id)
+    if index then
+        EditMacro(index, nil, icon, MacroBody(ring))
+    else
+        index = CreateMacro(("XR " .. ring.name):sub(1, 16), icon, MacroBody(ring), nil)
+    end
+    if index and index > 0 then
+        PickupMacro(index)
+        Print("The macro is on your cursor - drop it on an action bar slot.")
+    else
+        Print("Couldn't create the macro (are your macro slots full?).")
+    end
+end
+
+-------------------------------------------------------------------------------
+-- Slash commands
+-------------------------------------------------------------------------------
+local FindRing = FindRingByName
+
+local commands = {}
+
+function commands.new(name)
+    name = strtrim(name or "")
+    if name == "" then Print("Usage: /xrings new <name>") return end
+    if FindRing(name) then Print("A ring with that name already exists.") return end
+    if InCombatLockdown() then Print("Can't create rings in combat.") return end
+    local ring = { id = db.nextId, name = name, slots = {} }
+    db.nextId = db.nextId + 1
+    db.rings[#db.rings + 1] = ring
+    CreateOpener(ring)
+    Print(("Created '%s'. Fill it, then run /xrings macro %s"):format(name, name))
+    CloseRing()
+    ShowRing(ring, true)
+end
+
+function commands.edit(name)
+    local ring = FindRing(name)
+    if not ring then Print("No ring with that name. Try /xrings list") return end
+    if InCombatLockdown() then Print("Can't edit rings in combat.") return end
+    CloseRing()
+    ShowRing(ring, true)
+end
+
+function commands.macro(name)
+    local ring = FindRing(name)
+    if not ring then Print("No ring with that name. Try /xrings list") return end
+    MakeMacro(ring)
+end
+
+function commands.rename(args)
+    local oldName, newName = (args or ""):match("^(.-)%s*>%s*(.+)$")
+    if not oldName then Print("Usage: /xrings rename <old name> > <new name>") return end
+    local ring = FindRing(oldName)
+    if not ring then Print("No ring with that name. Try /xrings list") return end
+    RenameRing(ring, newName)
+end
+
+function commands.delete(name)
+    local ring, index = FindRing(name)
+    if not ring then Print("No ring with that name.") return end
+    if InCombatLockdown() then Print("Can't delete rings in combat.") return end
+    CloseRing()
+    if ui.ring == ring then ui:Hide() end
+    local macro = FindRingMacro(ring.id)   -- must go too, or the ring re-imports at next login
+    if macro then DeleteMacro(macro) end
+    if openers[ring.id] then openers[ring.id].ring = nil end
+    table.remove(db.rings, index)
+    Print(("Deleted '%s' and its macro."):format(ring.name))
+end
+
+function commands.list()
+    if #db.rings == 0 then Print("No rings yet. Create one with /xrings new <name>") return end
+    for _, ring in ipairs(db.rings) do
+        Print(("%s  (%d entries%s)"):format(ring.name, #ring.slots,
+            FindRingMacro(ring.id) and "" or ", |cffff6666no macro yet - won't survive a relog|r"))
+    end
+end
+
+SLASH_XANARINGS1 = "/xrings"
+SLASH_XANARINGS2 = "/xanarings"
+SlashCmdList.XANARINGS = function(msg)
+    local cmd, rest = strtrim(msg or ""):match("^(%S*)%s*(.-)$")
+    local fn = commands[strlower(cmd or "")]
+    if fn then
+        fn(rest)
+    else
+        Print("Commands: new <name>, edit <name>, rename <old> > <new>, macro <name>, delete <name>, list")
+    end
+end
+
+-- Data carrier line inside ring macros. Deliberately does nothing.
+SLASH_XANARINGSDATA1 = "/xrdata"
+SLASH_XANARINGSDATA2 = "/rrdata"
+SlashCmdList.XANARINGSDATA = function() end
+
+-------------------------------------------------------------------------------
+-- Events
+-------------------------------------------------------------------------------
+local loader = CreateFrame("Frame")
+loader:RegisterEvent("ADDON_LOADED")
+loader:RegisterEvent("PLAYER_LOGIN")
+loader:RegisterEvent("UPDATE_MACROS")
+loader:RegisterEvent("PLAYER_REGEN_DISABLED")
+loader:SetScript("OnEvent", function(self, event, name)
+    if event == "ADDON_LOADED" then
+        if name ~= ADDON then return end
+        XanaRingsDB = XanaRingsDB or {}
+        db = XanaRingsDB
+        db.rings  = db.rings or {}
+        db.nextId = db.nextId or 1
+        for _, ring in ipairs(db.rings) do
+            Compact(ring)
+            CreateOpener(ring)
+        end
+    elseif event == "PLAYER_REGEN_DISABLED" then
+        -- Fires just before combat lockdown: last chance to release our bindings.
+        CloseRing()
+    else
+        ImportFromMacros()
+    end
+end)
