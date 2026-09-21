@@ -21,7 +21,8 @@ ring on your action bar as a macro, and pick what to use with the stick.
    /xrings new Potions
    ```
 
-   The ring editor opens in the middle of the screen with a single "+" slot.
+   The ring editor opens in the middle of the screen with a single "+" slot,
+   and the ring's macro (`XR Potions`) is created for you.
 
 2. **Fill it.** Drag a spell from your spellbook or an item from your bags and
    drop it on the "+" to add it. A new "+" appears each time, so keep adding
@@ -29,13 +30,8 @@ ring on your action bar as a macro, and pick what to use with the stick.
    icon to replace it. Right-click an icon to remove it (the rest close up).
    Click Done when finished.
 
-3. **Make its macro:**
-
-   ```
-   /xrings macro Potions
-   ```
-
-   A macro appears on your cursor. Drop it on any action bar slot.
+3. **Put it on a bar.** Open the macro window with `/macro`, find `XR Potions`
+   in the General tab, and drag it onto any action bar slot.
 
 4. **Use it.** Press that action bar button and the ring opens.
 
@@ -74,7 +70,7 @@ The editor shows a list of types beside the ring. Tick the ones you want:
 | Other usable  | Any other usable consumable (weapon oils, stones, ...)  |
 
 The ring updates as you tick, so you can see exactly what it will offer.
-Then make its macro with `/xrings macro Consumables` as usual.
+Its macro is created with the ring; put it on a bar from `/macro` as usual.
 
 - Each item appears once, however many stacks you have. The number on the
   icon is how many you are carrying.
@@ -94,7 +90,7 @@ Then make its macro with `/xrings macro Consumables` as usual.
 | `/xrings edit <name>`          | Reopen the editor for an existing ring                               |
 | `/xrings types <name> > <types>` | Set an auto ring's types, e.g. `/xrings types Snacks > food, bandages` |
 | `/xrings rename <old> > <new>` | Rename a ring, e.g. `/xrings rename Potions > Consumables`           |
-| `/xrings macro <name>`         | Create (or refresh) the ring's macro and pick it up                  |
+| `/xrings macro <name>`         | Recreate a missing macro, or reset its icon to the first entry       |
 | `/xrings list`                 | Show all rings and how many entries (or which types) each has        |
 | `/xrings delete <name>`        | Delete a ring **and** its macro                                      |
 
@@ -119,8 +115,9 @@ can be shortened to their first three letters, and `all` and `none` also work.
 - Renaming a ring also retitles its macro (`XR <name>`), unless you gave the
   macro your own name, in which case it is left alone. The macro stays where
   it is on your action bar either way.
-- The macro icon is taken from the first entry. After changing a ring,
-  run `/xrings macro <name>` again if you want the icon refreshed.
+- The macro icon follows the ring's first entry and updates as you edit the
+  ring. If you pick your own icon for the macro, it is left alone;
+  `/xrings macro <name>` puts the automatic icon back.
 - Your character stops steering while the ring is open, because the ring
   takes over the stick. Close it with B if you opened it by accident.
 
@@ -131,11 +128,12 @@ can be shortened to their first three letters, and `all` and `none` also work.
   bindings during combat. If you enter combat with a ring open, it closes
   itself. This should become possible again once Blizzard fixes the client.
 
-- **Always make the macro.** The beta client does not reload addon saved settings
+- **Keep the macro.** The beta client does not reload addon saved settings
   between sessions, so XanaRings stores each ring's contents inside its macro
   and rebuilds your rings from your macros at login. A ring that has no macro
-  will be gone after you log out. `/xrings list` warns you about rings that
-  have no macro yet.
+  will be gone after you log out. Every ring gets its macro when it is
+  created; if that failed (macro slots full), `/xrings list` warns you and
+  `/xrings macro <name>` makes it once a slot is free.
 
 - **Do not edit the second line of a ring macro** (the one starting with
   `/xrdata`). That line is the ring's saved contents. The first line,
@@ -162,7 +160,8 @@ ring still exists, and make sure the addon is enabled in the AddOns list.
 
 **"Couldn't create the macro"**
 
-Your macro slots are full. Delete a macro you do not need and try again.
+Your General macro slots are full. Delete a macro you do not need, then run
+`/xrings macro <name>`.
 
 **I get a Lua error**
 

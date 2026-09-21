@@ -1,4 +1,4 @@
--- XanaRings 0.4.0  (snippet-free build for the WoW Forever beta)
+-- XanaRings 0.5.0  (snippet-free build for the WoW Forever beta)
 --
 -- The Forever beta client cannot compile restricted-environment snippets
 -- (loadstring_untainted is missing), so this version uses none:
@@ -357,10 +357,41 @@ local function FindRingMacro(id)
     end
 end
 
+local QUESTION_MARK = 134400
+
+local function RingIcon(ring)
+    return ring.slots[1] and GetIcon(ring.slots[1]) or QUESTION_MARK
+end
+
+-- The macro's icon follows the ring's first entry, unless the player picked their own:
+-- anything other than the question mark, the icon we last set, or one of the ring's icons.
+local function OwnsIcon(ring, icon)
+    if icon == nil or icon == QUESTION_MARK or icon == ring.macroIcon then return true end
+    for _, slot in ipairs(ring.slots) do
+        if GetIcon(slot) == icon then return true end
+    end
+    return false
+end
+
 local function UpdateMacro(ring)
     if InCombatLockdown() then return end
     local index = FindRingMacro(ring.id)
-    if index then EditMacro(index, nil, nil, MacroBody(ring)) end
+    if not index then return end
+    local _, icon = GetMacroInfo(index)
+    local newIcon = OwnsIcon(ring, icon) and RingIcon(ring) or nil
+    if newIcon then ring.macroIcon = newIcon end
+    EditMacro(index, nil, newIcon, MacroBody(ring))
+end
+
+local function CreateRingMacro(ring)
+    local icon = RingIcon(ring)
+    local ok, index = pcall(CreateMacro, ("XR " .. ring.name):sub(1, 16), icon, MacroBody(ring), nil)
+    if ok and index and index > 0 then
+        ring.macroIcon = icon
+        return index
+    end
+    Print(("Couldn't create the macro for '%s' (are your General macro slots full?). "
+        .. "Free a slot, then run /xrings macro %s"):format(ring.name, ring.name))
 end
 
 local function FindRingById(id)
@@ -480,11 +511,9 @@ local function SetAutoType(ring, key, on)
         if has then keys[#keys + 1] = t.key end
     end
     ring.auto = table.concat(keys)
+    Rescan(ring)                                            -- before UpdateMacro, which picks the icon
     UpdateMacro(ring)
-    if ui.ring == ring and ui:IsShown() then
-        Rescan(ring)
-        Refresh()
-    end
+    if ui.ring == ring and ui:IsShown() then Refresh() end
 end
 
 -- "potion, food & drink, quest" -> "pdq".  Returns nil plus the word it didn't know.
@@ -565,21 +594,19 @@ ui.autoPanel = panel
 -------------------------------------------------------------------------------
 -- Macros
 -------------------------------------------------------------------------------
+local PLACE_HINT = "Drag it from the macro window (/macro, General tab) onto an action bar."
+
+-- Rings get their macro when created; this recreates a lost one or resets its icon.
 local function MakeMacro(ring)
     if InCombatLockdown() then Print("Can't create macros in combat.") return end
     Rescan(ring)
-    local icon =ring.slots[1] and GetIcon(ring.slots[1]) or 134400
     local index = FindRingMacro(ring.id)
     if index then
-        EditMacro(index, nil, icon, MacroBody(ring))
-    else
-        index = CreateMacro(("XR " .. ring.name):sub(1, 16), icon, MacroBody(ring), nil)
-    end
-    if index and index > 0 then
-        PickupMacro(index)
-        Print("The macro is on your cursor - drop it on an action bar slot.")
-    else
-        Print("Couldn't create the macro (are your macro slots full?).")
+        ring.macroIcon = RingIcon(ring)
+        EditMacro(index, nil, ring.macroIcon, MacroBody(ring))
+        Print(("Refreshed the macro for '%s'."):format(ring.name))
+    elseif CreateRingMacro(ring) then
+        Print(("Created the macro for '%s'. %s"):format(ring.name, PLACE_HINT))
     end
 end
 
@@ -600,10 +627,11 @@ local function CreateRing(name, auto, usage)
     db.nextId = db.nextId + 1
     db.rings[#db.rings + 1] = ring
     CreateOpener(ring)
-    if auto then
-        Print(("Created auto ring '%s'. Tick the item types it should offer, then run /xrings macro %s"):format(name, name))
+    local what = auto and "auto ring" or "ring"
+    if CreateRingMacro(ring) then
+        Print(("Created %s '%s' and its macro. %s"):format(what, name, PLACE_HINT))
     else
-        Print(("Created '%s'. Fill it, then run /xrings macro %s"):format(name, name))
+        Print(("Created %s '%s'."):format(what, name))
     end
     CloseRing()
     ShowRing(ring, true)
@@ -631,9 +659,9 @@ function commands.types(args)
             return
         end
         ring.auto = keys
+        Rescan(ring)                                        -- before UpdateMacro, which picks the icon
         UpdateMacro(ring)
         if ui.ring == ring and ui:IsShown() then
-            Rescan(ring)
             if ui.editing then ui.autoPanel:Sync() end
             Refresh()
         end
@@ -681,7 +709,7 @@ function commands.list()
     for _, ring in ipairs(db.rings) do
         local contents = ring.auto and ("auto: " .. AutoLabels(ring.auto)) or (#ring.slots .. " entries")
         Print(("%s  (%s%s)"):format(ring.name, contents,
-            FindRingMacro(ring.id) and "" or ", |cffff6666no macro yet - won't survive a relog|r"))
+            FindRingMacro(ring.id) and "" or ", |cffff6666no macro - won't survive a relog, run /xrings macro " .. ring.name .. "|r"))
     end
 end
 
