@@ -4,5 +4,6 @@
 ## Author: Srdan Nikolic
 ## Version: 0.3.3
 ## SavedVariables: XanaRingsDB
+## Category: Xana
 
 Core.lua
