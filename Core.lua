@@ -1,4 +1,4 @@
--- XanaRings 0.5.0  (snippet-free build for the WoW Forever beta)
+-- XanaRings 0.6.0  (snippet-free build for the WoW Forever beta)
 --
 -- The Forever beta client cannot compile restricted-environment snippets
 -- (loadstring_untainted is missing), so this version uses none:
@@ -345,15 +345,25 @@ local function MacroBody(ring)
     return "/click XanaRingsOpen" .. ring.id .. "\n/xrdata " .. Serialize(ring)
 end
 
-local function MaxMacros()
-    return (MAX_ACCOUNT_MACROS or 120) + (MAX_CHARACTER_MACROS or 30)
+-- Rings live in character-specific macros only. General (account) macros fill
+-- indexes 1..numAccount with no gaps and character macros come after them, so
+-- anything past numAccount is a character macro. The scan end just needs to be
+-- beyond the last possible macro index on any client.
+local MACRO_SCAN_END = 300
+
+local function CharacterMacros()
+    local list = {}
+    for i = (GetNumMacros() or 0) + 1, MACRO_SCAN_END do
+        local name, _, body = GetMacroInfo(i)
+        if name then list[#list + 1] = { index = i, body = body or "" } end
+    end
+    return list
 end
 
 local function FindRingMacro(id)
     local needle, legacy = "/xrdata " .. id .. "|", "/rrdata " .. id .. "|"
-    for i = 1, MaxMacros() do
-        local name, _, body = GetMacroInfo(i)
-        if name and body and (body:find(needle, 1, true) or body:find(legacy, 1, true)) then return i end
+    for _, m in ipairs(CharacterMacros()) do
+        if m.body:find(needle, 1, true) or m.body:find(legacy, 1, true) then return m.index end
     end
 end
 
@@ -385,12 +395,12 @@ end
 
 local function CreateRingMacro(ring)
     local icon = RingIcon(ring)
-    local ok, index = pcall(CreateMacro, ("XR " .. ring.name):sub(1, 16), icon, MacroBody(ring), nil)
+    local ok, index = pcall(CreateMacro, ("XR " .. ring.name):sub(1, 16), icon, MacroBody(ring), true)
     if ok and index and index > 0 then
         ring.macroIcon = icon
         return index
     end
-    Print(("Couldn't create the macro for '%s' (are your General macro slots full?). "
+    Print(("Couldn't create the macro for '%s' (are this character's macro slots full?). "
         .. "Free a slot, then run /xrings macro %s"):format(ring.name, ring.name))
 end
 
@@ -409,24 +419,29 @@ local function CreateOpener(ring)
     openers[ring.id] = b
 end
 
+-- Fills ring.auto / ring.slots from the data part of a Serialize() string.
+local function ApplyRingData(ring, data)
+    ring.auto = data:match("^@(%a*)$")
+    ring.slots = {}
+    for _, field in ipairs(ring.auto and {} or { strsplit(",", data) }) do
+        local kind, num = field:match("^([si])(%d+)$")
+        if kind then
+            ring.slots[#ring.slots + 1] = { kind = kind == "s" and "spell" or "item", id = tonumber(num) }
+        end
+    end
+end
+
 -- Rebuild any ring that exists as a macro but not in the DB.
 local function ImportFromMacros()
     if not db then return end
-    for i = 1, MaxMacros() do
-        local _, _, body = GetMacroInfo(i)
+    for _, m in ipairs(CharacterMacros()) do
+        local i, body = m.index, m.body
         -- "/rrdata" is the data line written by the addon's old name (RadialRings)
-        local id, name, data = (body or ""):match("/[xr]rdata (%d+)|([^|]*)|([^\n]*)")
+        local id, name, data = body:match("/[xr]rdata (%d+)|([^|]*)|([^\n]*)")
         id = tonumber(id)
         if id and not FindRingById(id) then
-            local ring = { id = id, name = name ~= "" and name or ("Ring " .. id), slots = {},
-                           auto = data:match("^@(%a*)$") }
-            for _, field in ipairs(ring.auto and {} or { strsplit(",", data) }) do
-                local kind, num = field:match("^([si])(%d+)$")
-                if kind then
-                    ring.slots[#ring.slots + 1] =
-                        { kind = kind == "s" and "spell" or "item", id = tonumber(num) }
-                end
-            end
+            local ring = { id = id, name = name ~= "" and name or ("Ring " .. id) }
+            ApplyRingData(ring, data)
             db.rings[#db.rings + 1] = ring
             if id >= db.nextId then db.nextId = id + 1 end
             CreateOpener(ring)
@@ -594,7 +609,7 @@ ui.autoPanel = panel
 -------------------------------------------------------------------------------
 -- Macros
 -------------------------------------------------------------------------------
-local PLACE_HINT = "Drag it from the macro window (/macro, General tab) onto an action bar."
+local PLACE_HINT = "Drag it from the macro window (/macro, the tab with your character's name) onto an action bar."
 
 -- Rings get their macro when created; this recreates a lost one or resets its icon.
 local function MakeMacro(ring)
@@ -610,6 +625,181 @@ local function MakeMacro(ring)
     end
 end
 
+-- Characters a ring name can't contain (the macro data line uses them as separators).
+local function CleanName(name)
+    return strtrim(((name or ""):gsub("[|,\n]", "")))      -- extra parens drop gsub's count
+end
+
+-- auto: nil for a normal ring, a string of type letters for an auto ring.
+local function AddRing(name, auto)
+    local ring = { id = db.nextId, name = name, slots = {}, auto = auto }
+    db.nextId = db.nextId + 1
+    db.rings[#db.rings + 1] = ring
+    CreateOpener(ring)
+    return ring
+end
+
+-------------------------------------------------------------------------------
+-- Export / import strings: "XR1:" + base64 of one "name|data" line per ring.
+-- Base64 keeps "|" out of the edit box, where WoW would read it as an escape code.
+-------------------------------------------------------------------------------
+local EXPORT_PREFIX = "XR1:"
+local B64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+
+local function Base64Encode(s)
+    local out = {}
+    for i = 1, #s, 3 do
+        local a, b, c = s:byte(i, i + 2)
+        local n = a * 65536 + (b or 0) * 256 + (c or 0)
+        local d1, d2 = math.floor(n / 262144) % 64, math.floor(n / 4096) % 64
+        local d3, d4 = math.floor(n / 64) % 64, n % 64
+        out[#out + 1] = B64:sub(d1 + 1, d1 + 1) .. B64:sub(d2 + 1, d2 + 1)
+            .. (b and B64:sub(d3 + 1, d3 + 1) or "=") .. (c and B64:sub(d4 + 1, d4 + 1) or "=")
+    end
+    return table.concat(out)
+end
+
+-- Returns nil for anything that isn't valid base64.
+local function Base64Decode(s)
+    s = s:gsub("%s", "")
+    if #s % 4 ~= 0 then return nil end
+    local out = {}
+    for i = 1, #s, 4 do
+        local n, pad = 0, 0
+        for j = i, i + 3 do
+            local ch = s:sub(j, j)
+            local v = B64:find(ch, 1, true)
+            if ch == "=" and j >= i + 2 then
+                pad, n = pad + 1, n * 64
+            elseif v and pad == 0 then
+                n = n * 64 + v - 1
+            else
+                return nil
+            end
+        end
+        out[#out + 1] = string.char(math.floor(n / 65536) % 256)
+            .. (pad < 2 and string.char(math.floor(n / 256) % 256) or "")
+            .. (pad < 1 and string.char(n % 256) or "")
+    end
+    return table.concat(out)
+end
+
+local function ExportString(rings)
+    local lines = {}
+    for i, ring in ipairs(rings) do lines[i] = Serialize(ring):match("^%d+|(.*)$") end
+    return EXPORT_PREFIX .. Base64Encode(table.concat(lines, "\n"))
+end
+
+local function KnowsSpell(id)
+    if IsPlayerSpell then return IsPlayerSpell(id) end
+    if IsSpellKnown then return IsSpellKnown(id) end
+    return true
+end
+
+-- Rings whose name already exists here are overwritten; the rest are created.
+-- Returns true if the string was valid.
+local function ImportRings(text)
+    if InCombatLockdown() then Print("Can't import rings in combat.") return false end
+    text = strtrim(text or "")
+    local payload = text:sub(1, #EXPORT_PREFIX) == EXPORT_PREFIX and Base64Decode(text:sub(#EXPORT_PREFIX + 1))
+    if not payload or payload == "" then Print("That isn't a XanaRings export string.") return false end
+
+    CloseRing()
+    ui:Hide()
+    local added, replaced, unknownSpells = 0, 0, 0
+    for line in payload:gmatch("[^\n]+") do
+        local name, data = line:match("^([^|]*)|(.*)$")
+        name = CleanName(name)
+        if name ~= "" then
+            local ring = FindRingByName(name)
+            local isNew = not ring
+            ring = ring or AddRing(name)
+            ApplyRingData(ring, data)
+            -- Spells this character doesn't have would only be dead slots.
+            local kept = {}
+            for _, slot in ipairs(ring.slots) do
+                if slot.kind ~= "spell" or KnowsSpell(slot.id) then
+                    kept[#kept + 1] = slot
+                else
+                    unknownSpells = unknownSpells + 1
+                end
+            end
+            ring.slots = kept
+            -- This character's ring ID may be longer than the exporter's.
+            while #MacroBody(ring) > MACRO_LIMIT and #ring.slots > 0 do ring.slots[#ring.slots] = nil end
+            Rescan(ring)
+            if FindRingMacro(ring.id) then UpdateMacro(ring) else CreateRingMacro(ring) end
+            if isNew then added = added + 1 else replaced = replaced + 1 end
+        end
+    end
+    Print(("Imported %d new and %d existing ring(s)."):format(added, replaced))
+    if unknownSpells > 0 then
+        Print(("Left out %d spell(s) this character doesn't know."):format(unknownSpells))
+    end
+    if added > 0 then Print("New rings' macros are in /macro, on the tab with your character's name.") end
+    return true
+end
+
+-- Window with one text box: shows an export string to copy, or takes one to import.
+local dialog = CreateFrame("Frame", "XanaRingsDialog", UIParent)
+dialog:SetSize(480, 130)
+dialog:SetPoint("CENTER", 0, 150)
+dialog:SetFrameStrata("FULLSCREEN_DIALOG")
+dialog:EnableMouse(true)
+dialog:Hide()
+tinsert(UISpecialFrames, "XanaRingsDialog")                 -- Escape closes it
+dialog.bg = dialog:CreateTexture(nil, "BACKGROUND")
+dialog.bg:SetAllPoints()
+dialog.bg:SetColorTexture(0, 0, 0, 0.85)
+dialog.title = dialog:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+dialog.title:SetPoint("TOP", 0, -12)
+dialog.hint = dialog:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+dialog.hint:SetPoint("TOP", 0, -36)
+
+dialog.box = CreateFrame("EditBox", nil, dialog, "InputBoxTemplate")
+dialog.box:SetSize(440, 24)
+dialog.box:SetPoint("TOP", 0, -56)
+dialog.box:SetAutoFocus(false)
+dialog.box:SetMaxLetters(0)
+
+dialog.action = CreateFrame("Button", nil, dialog, "UIPanelButtonTemplate")
+dialog.action:SetSize(100, 22)
+dialog.action:SetPoint("BOTTOM", -56, 14)
+dialog.action:SetText("Import")
+dialog.action:SetScript("OnClick", function()
+    if ImportRings(dialog.box:GetText()) then dialog:Hide() end
+end)
+
+dialog.close = CreateFrame("Button", nil, dialog, "UIPanelButtonTemplate")
+dialog.close:SetSize(100, 22)
+dialog.close:SetText(CLOSE or "Close")
+dialog.close:SetScript("OnClick", function() dialog:Hide() end)
+
+dialog.box:SetScript("OnEscapePressed", function() dialog:Hide() end)
+dialog.box:SetScript("OnEnterPressed", function()
+    if dialog.mode == "import" then dialog.action:Click() end
+end)
+dialog.box:SetScript("OnTextChanged", function(self, userInput)
+    -- An export string stays as it is, whatever gets typed into it.
+    if userInput and dialog.mode == "export" then
+        self:SetText(dialog.exportText)
+        self:HighlightText()
+    end
+end)
+
+function dialog:Open(mode, title, hint, text)
+    self.mode, self.exportText = mode, text
+    self.title:SetText(title)
+    self.hint:SetText(hint)
+    self.action:SetShown(mode == "import")
+    self.close:ClearAllPoints()
+    self.close:SetPoint("BOTTOM", mode == "import" and 56 or 0, 14)
+    self.box:SetText(text or "")
+    self:Show()
+    self.box:SetFocus()
+    self.box:HighlightText()
+end
+
 -------------------------------------------------------------------------------
 -- Slash commands
 -------------------------------------------------------------------------------
@@ -617,16 +807,12 @@ local FindRing = FindRingByName
 
 local commands = {}
 
--- auto: nil for a normal ring, a string of type letters for an auto ring.
 local function CreateRing(name, auto, usage)
-    name = strtrim(((name or ""):gsub("[|,\n]", "")))      -- extra parens drop gsub's count
+    name = CleanName(name)
     if name == "" then Print(usage) return end
     if FindRing(name) then Print("A ring with that name already exists.") return end
     if InCombatLockdown() then Print("Can't create rings in combat.") return end
-    local ring = { id = db.nextId, name = name, slots = {}, auto = auto }
-    db.nextId = db.nextId + 1
-    db.rings[#db.rings + 1] = ring
-    CreateOpener(ring)
+    local ring = AddRing(name, auto)
     local what = auto and "auto ring" or "ring"
     if CreateRingMacro(ring) then
         Print(("Created %s '%s' and its macro. %s"):format(what, name, PLACE_HINT))
@@ -704,6 +890,26 @@ function commands.delete(name)
     Print(("Deleted '%s' and its macro."):format(ring.name))
 end
 
+function commands.export(name)
+    local rings, what
+    if strtrim(name or "") == "" then
+        rings, what = db.rings, "all rings"
+        if #rings == 0 then Print("No rings to export yet.") return end
+    else
+        local ring = FindRing(name)
+        if not ring then Print("No ring with that name. Try /xrings list") return end
+        rings, what = { ring }, ("'%s'"):format(ring.name)
+    end
+    dialog:Open("export", "Export " .. what,
+        "Press Ctrl+C to copy, then paste it into /xrings import on another character.", ExportString(rings))
+end
+
+function commands.import()
+    if InCombatLockdown() then Print("Can't import rings in combat.") return end
+    dialog:Open("import", "Import rings",
+        "Paste an export string with Ctrl+V. Rings with the same name are overwritten.")
+end
+
 function commands.list()
     if #db.rings == 0 then Print("No rings yet. Create one with /xrings new <name>") return end
     for _, ring in ipairs(db.rings) do
@@ -722,7 +928,7 @@ SlashCmdList.XANARINGS = function(msg)
         fn(rest)
     else
         Print("Commands: new <name>, auto <name>, edit <name>, types <name> > <types>, "
-            .. "rename <old> > <new>, macro <name>, delete <name>, list")
+            .. "rename <old> > <new>, macro <name>, delete <name>, list, export [name], import")
     end
 end
 

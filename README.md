@@ -31,7 +31,7 @@ ring on your action bar as a macro, and pick what to use with the stick.
    Click Done when finished.
 
 3. **Put it on a bar.** Open the macro window with `/macro`, find `XR Potions`
-   in the General tab, and drag it onto any action bar slot.
+   on the tab with your character's name, and drag it onto any action bar slot.
 
 4. **Use it.** Press that action bar button and the ring opens.
 
@@ -44,7 +44,9 @@ ring on your action bar as a macro, and pick what to use with the stick.
 
    Pressing the macro again while the ring is open also closes it.
 
-You can make as many rings as you have free macro slots.
+Rings belong to the character that made them: each ring's macro is a
+character-specific macro, so you can make as many rings as that character
+has free macro slots. See [Copying rings to another character](#copying-rings-to-another-character).
 
 ## Auto rings
 
@@ -81,6 +83,19 @@ Its macro is created with the ring; put it on a bar from `/macro` as usual.
 - The contents change as your bags do, so the items under the D-pad
   directions move around too.
 
+## Copying rings to another character
+
+1. On the character that has the rings, run `/xrings export` for all rings,
+   or `/xrings export <name>` for one.
+2. A window shows the export string, already selected. Press Ctrl+C.
+3. On the other character, run `/xrings import`, press Ctrl+V in the box and
+   click Import.
+
+Imported rings get their own macros on the new character. A ring with the
+same name as one the character already has replaces it. Spells the character
+doesn't know are left out, so a mage's spell ring imported on a warrior keeps
+only its items.
+
 ## Commands
 
 | Command                        | Description                                                          |
@@ -93,6 +108,8 @@ Its macro is created with the ring; put it on a bar from `/macro` as usual.
 | `/xrings macro <name>`         | Recreate a missing macro, or reset its icon to the first entry       |
 | `/xrings list`                 | Show all rings and how many entries (or which types) each has        |
 | `/xrings delete <name>`        | Delete a ring **and** its macro                                      |
+| `/xrings export [name]`        | Show one ring (or all rings) as a string you can copy                |
+| `/xrings import`               | Paste a string from `/xrings export` to add its rings                |
 
 `/xrings types <name>` without a list shows the ring's current types. Type names
 can be shortened to their first three letters, and `all` and `none` also work.
@@ -160,7 +177,7 @@ ring still exists, and make sure the addon is enabled in the AddOns list.
 
 **"Couldn't create the macro"**
 
-Your General macro slots are full. Delete a macro you do not need, then run
+This character's macro slots are full. Delete a macro you do not need, then run
 `/xrings macro <name>`.
 
 **I get a Lua error**

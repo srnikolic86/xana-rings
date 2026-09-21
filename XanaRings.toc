@@ -2,8 +2,8 @@
 ## Title: XanaRings
 ## Notes: Custom gamepad radial menus for spells and items, opened from action bar macros.
 ## Author: Srdan Nikolic
-## Version: 0.5.0
-## SavedVariables: XanaRingsDB
+## Version: 0.6.0
+## SavedVariablesPerCharacter: XanaRingsDB
 ## Category: Xana
 
 Core.lua
