@@ -138,14 +138,12 @@ can be shortened to their first three letters, and `all` and `none` also work.
 - Your character stops steering while the ring is open, because the ring
   takes over the stick. Close it with B if you opened it by accident.
 
-## Known limitations (current Forever beta)
+## Known limitations
 
-- **Rings do not open in combat.** The beta client is missing the function that
-  compiles secure addon snippets, which is the only way an addon may change
-  bindings during combat. If you enter combat with a ring open, it closes
-  itself. This should become possible again once Blizzard fixes the client.
+- **Rings do not open in combat.** If you enter combat with a ring open, it
+  closes itself.
 
-- **Keep the macro.** The beta client does not reload addon saved settings
+- **Keep the macro.** The Forever client does not reload addon saved settings
   between sessions, so XanaRings stores each ring's contents inside its macro
   and rebuilds your rings from your macros at login. A ring that has no macro
   will be gone after you log out. Every ring gets its macro when it is
@@ -162,7 +160,7 @@ can be shortened to their first three letters, and `all` and `none` also work.
   cleanly.
 
 - Auto ring types come from the game's own item data. Some items may land
-  under an unexpected type (or under Other usable) on the beta client; the
+  under an unexpected type (or under Other usable); the
   preview in the editor shows what each type actually picks up.
 
 - Rings hold spells and items only for now. Macros, mounts and toys inside a
